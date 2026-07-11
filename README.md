@@ -24,6 +24,15 @@
 
 ## インストールと起動
 
+### Windows（かんたん・EXE版）
+
+[Releases](https://github.com/YUICHIMIZOUCHI/rms-item-tool/releases) から `rms-item-tool.exe` をダウンロードしてダブルクリックするだけ。Pythonのインストールは不要です。
+
+※初回起動時に「WindowsによってPCが保護されました」と表示された場合は「詳細情報」→「実行」をクリックしてください（コード署名を行っていないための表示です）。
+※設定・データはEXEと同じフォルダに保存されるため、書き込み可能なフォルダ（デスクトップ等）に置いてください。
+
+### Python版（Windows / Mac）
+
 ```bash
 git clone https://github.com/YUICHIMIZOUCHI/rms-item-tool.git
 cd rms-item-tool

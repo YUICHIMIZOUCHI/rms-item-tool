@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import webbrowser
@@ -15,11 +16,16 @@ from flask import Flask, jsonify, request, send_file, render_template
 
 from rms_client import RmsClient, MockRmsClient, RmsError
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # PyInstaller製EXEとして実行中：テンプレートは展開先、データはEXEの隣に置く
+    RESOURCE_DIR = sys._MEIPASS
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
 
 # ----------------- 設定 -----------------
