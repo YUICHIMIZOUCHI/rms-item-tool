@@ -25,7 +25,7 @@
 ## インストールと起動
 
 ```bash
-git clone https://github.com/<yourname>/rms-item-tool.git
+git clone https://github.com/YUICHIMIZOUCHI/rms-item-tool.git
 cd rms-item-tool
 pip install -r requirements.txt
 python app.py
