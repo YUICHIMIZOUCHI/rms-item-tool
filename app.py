@@ -25,8 +25,18 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
+APP_VERSION = "1.0.1"
+
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
+
+
+@app.after_request
+def no_cache(resp):
+    # 古い画面がブラウザにキャッシュされて新機能が見えなくなるのを防ぐ
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 # ----------------- 設定 -----------------
 DEFAULT_CONFIG = {"serviceSecret": "", "licenseKey": "", "demoMode": True, "waitMs": 700}
@@ -738,7 +748,7 @@ def api_sale_restore():
 # ----------------- ルーティング -----------------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", version=APP_VERSION)
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
