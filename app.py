@@ -25,7 +25,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -1222,11 +1222,27 @@ def api_stats():
     return jsonify({"total": r["total"], "pending": r["pending"] or 0, "new": r["new_items"] or 0})
 
 
+def pick_free_port(start):
+    """指定ポートが使用中（古いバージョンが起動中など）なら空いているポートを探す"""
+    import socket
+    for p in range(start, start + 20):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", p))
+            return p
+        except OSError:
+            continue
+    return start
+
+
 if __name__ == "__main__":
     init_db()
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    port = int(os.environ.get("PORT", 8930))
-    print(f"* RMS商品一括編集ツール: http://localhost:{port} をブラウザで開いてください")
+    port = pick_free_port(int(os.environ.get("PORT", 8930)))
+    print(f"* RMS商品一括編集ツール v{APP_VERSION}: http://localhost:{port} をブラウザで開いてください")
+    if port != int(os.environ.get("PORT", 8930)):
+        print("* 注意: 標準ポートが使用中のため別ポートで起動しました。"
+              "古いバージョンのツールが起動したままの可能性があります。")
     try:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     except Exception:
