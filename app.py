@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 
 from flask import Flask, jsonify, request, send_file, render_template
@@ -25,7 +26,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -751,6 +752,25 @@ def index():
     return render_template("index.html", version=APP_VERSION)
 
 
+@app.route("/favicon.ico")
+def favicon():
+    path = os.path.join(RESOURCE_DIR, "app.ico")
+    if os.path.exists(path):
+        return send_file(path, mimetype="image/x-icon")
+    return "", 404
+
+
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """ブラウザの［終了］ボタンからツール本体を停止する。
+    コンソール非表示のEXEでは、これが唯一の終了手段になる。"""
+    def _die():
+        time.sleep(0.4)   # レスポンスを返しきってから落とす
+        os._exit(0)
+    threading.Thread(target=_die, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "POST":
@@ -1235,16 +1255,70 @@ def pick_free_port(start):
     return start
 
 
-if __name__ == "__main__":
-    init_db()
-    threading.Thread(target=scheduler_loop, daemon=True).start()
-    port = pick_free_port(int(os.environ.get("PORT", 8930)))
-    print(f"* RMS商品一括編集ツール v{APP_VERSION}: http://localhost:{port} をブラウザで開いてください")
-    if port != int(os.environ.get("PORT", 8930)):
-        print("* 注意: 標準ポートが使用中のため別ポートで起動しました。"
-              "古いバージョンのツールが起動したままの可能性があります。")
+LOG_PATH = os.path.join(BASE_DIR, "起動ログ.txt")
+
+
+def setup_windowed_io():
+    """コンソール非表示のEXE（PyInstaller --noconsole）では sys.stdout/stderr が
+    None になり、print() やFlaskのログ出力が例外を起こす。ログファイルへ振り向ける。
+    通常のコンソール実行時は何もしない。"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return False
     try:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+        f = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        f = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stderr = f
+    print(f"\n===== 起動 {time.strftime('%Y-%m-%d %H:%M:%S')} v{APP_VERSION} =====")
+    return True
+
+
+def show_error_dialog(message):
+    """コンソールが無くてもユーザーにエラーを見せる。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # 0x10 = MB_ICONERROR
+            ctypes.windll.user32.MessageBoxW(None, message, "RMS商品一括編集ツール", 0x10)
+            return
+        except Exception:
+            pass
+    try:
+        print(message)
     except Exception:
         pass
-    app.run(host="127.0.0.1", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    windowed = setup_windowed_io()
+    try:
+        init_db()
+        threading.Thread(target=scheduler_loop, daemon=True).start()
+        port = pick_free_port(int(os.environ.get("PORT", 8930)))
+        print(f"* RMS商品一括編集ツール v{APP_VERSION}: http://localhost:{port} をブラウザで開いてください")
+        if port != int(os.environ.get("PORT", 8930)):
+            print("* 注意: 標準ポートが使用中のため別ポートで起動しました。"
+                  "古いバージョンのツールが起動したままの可能性があります。")
+        try:
+            threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+        except Exception:
+            pass
+        app.run(host="127.0.0.1", port=port, debug=False)
+    except SystemExit:
+        raise
+    except Exception:
+        tb = traceback.format_exc()
+        try:
+            print(tb)
+        except Exception:
+            pass
+        last = tb.strip().splitlines()[-1] if tb.strip() else "不明なエラー"
+        msg = ("ツールの起動に失敗しました。\n\n"
+               f"{last}\n\n"
+               "よくある原因:\n"
+               "・書き込みできない場所（ZIP内・Program Files等）に置いている\n"
+               "・ウイルス対策ソフトにブロックされている\n\n")
+        if windowed:
+            msg += f"詳細ログ:\n{LOG_PATH}"
+        show_error_dialog(msg)
+        raise SystemExit(1)

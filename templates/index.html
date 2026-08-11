@@ -78,6 +78,8 @@
   <h1>RMS商品一括編集ツール <span style="font-size:11px;opacity:.8">v{{ version }}</span></h1>
   <span class="stats" id="stats"></span>
   <span class="stats" id="demoBadge" style="margin-left:auto"></span>
+  <button id="btnQuit" title="ツールを終了します"
+    style="background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">終了</button>
 </header>
 <nav>
   <button data-tab="items" class="active">商品一覧</button>
@@ -973,6 +975,15 @@ $("btnSaleRemove").onclick = ()=>{
   saleFlag({targets:[...selected], value:false});
 };
 $("btnSaleClear").onclick = ()=>{ if(confirm("セール対象をすべて解除しますか？")) saleFlag({clearAll:true}); };
+$("btnQuit").onclick = async ()=>{
+  if(!confirm("ツールを終了します。よろしいですか？\n\n※編集内容は保存済みです。\n※予約された自動復元は、ツール停止中は実行されません。")) return;
+  try { await fetch("/api/shutdown", {method:"POST"}); } catch(e) {}
+  document.body.innerHTML =
+    '<div style="padding:60px 20px;text-align:center;font-family:inherit">' +
+    '<h2 style="color:#bf0000">ツールを終了しました</h2>' +
+    '<p class="muted">このタブは閉じて構いません。<br>' +
+    '再開するには rms-item-tool.exe をもう一度ダブルクリックしてください。</p></div>';
+};
 $("btnSaleShow").onclick = ()=>{
   $("filterOnly").value="sale"; page=1;
   document.querySelector('nav button[data-tab="items"]').click(); loadItems();

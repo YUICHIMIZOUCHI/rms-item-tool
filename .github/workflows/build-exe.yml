@@ -21,10 +21,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
+      # EXEのプロパティ（詳細タブ）に名前・バージョンを表示させる。
+      # 素性のわからない実行ファイルに見えるとSmartScreenの警告が出やすいため。
+      - name: Generate version info
+        shell: python
+        run: |
+          import re, pathlib
+          src = pathlib.Path("app.py").read_text(encoding="utf-8")
+          ver = re.search(r'APP_VERSION\s*=\s*"([\d.]+)"', src).group(1)
+          nums = (list(map(int, ver.split("."))) + [0, 0, 0, 0])[:4]
+          pathlib.Path("version_info.txt").write_text(f'''VSVersionInfo(
+            ffi=FixedFileInfo(
+              filevers={tuple(nums)}, prodvers={tuple(nums)},
+              mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+            kids=[
+              StringFileInfo([StringTable('041104b0', [
+                StringStruct('FileDescription', 'RMS商品一括編集ツール'),
+                StringStruct('FileVersion', '{ver}'),
+                StringStruct('InternalName', 'rms-item-tool'),
+                StringStruct('LegalCopyright', 'MIT License'),
+                StringStruct('OriginalFilename', 'rms-item-tool.exe'),
+                StringStruct('ProductName', 'RMS商品一括編集ツール'),
+                StringStruct('ProductVersion', '{ver}'),
+              ])]),
+              VarFileInfo([VarStruct('Translation', [0x0411, 1200])])
+            ]
+          )
+          ''', encoding="utf-8")
+          print("version:", ver)
+
+      # --noconsole: 黒いコンソール画面を出さず、アプリのように起動させる。
+      #   stdout/stderr が None になるため app.py 側で起動ログ.txt に振り向けている。
+      #   終了はブラウザ画面右上の［終了］ボタン（/api/shutdown）で行う。
       - name: Build EXE
         run: >
-          pyinstaller --onefile --name rms-item-tool
+          pyinstaller --onefile --noconsole
+          --name rms-item-tool
+          --icon app.ico
+          --version-file version_info.txt
           --add-data "templates;templates"
+          --add-data "app.ico;."
           app.py
 
       - name: Upload artifact (手動実行時のダウンロード用)
