@@ -129,7 +129,8 @@
         <th>キャッチコピー <button class="fbtn" data-col="tagline">▼</button></th>
         <th>価格 <button class="fbtn" data-col="price">▼</button></th>
         <th>状態 <button class="fbtn" data-col="status">▼</button></th>
-        <th title="セール対象">🏷セール</th>
+        <th title="セール対象" style="white-space:nowrap">
+          <input type="checkbox" id="saleCheckAll" title="表示中の商品をまとめてセール対象にする"> 🏷セール</th>
         <th></th>
       </tr></thead>
       <tbody id="itemRows"></tbody>
@@ -288,6 +289,52 @@
     </div>
     <p><button class="btn" id="btnSaleStart">セールを開始（履歴保存→RMSに反映→復元予約）</button></p>
     <div class="msg" id="saleMsg"></div>
+  </div>
+  <div class="card">
+    <h2>スーパーSALEサーチ 申請用CSV</h2>
+    <p class="muted">セール対象商品から、RMS［店舗設定→商品管理→イベント商品申請→一括申請］にアップロードするCSVを作成します。
+      掲載条件は<b>二重価格から10%以上の値引き</b>（50%以上で半額サーチ）。下の一覧で割引率を確認してからダウンロードしてください。</p>
+    <div style="background:#fff8e6;border:1px solid #e8c56a;border-radius:4px;padding:10px 12px;margin-bottom:10px;font-size:12.5px">
+      <b>⚠ RMSの一括申請は「アップロードした内容で全件上書き」されます。</b><br>
+      すでに申請済みの商品がある場合、この画面のCSVをそのまま上げると<b>申請済み分が消えます</b>。
+      RMSの一括申請画面で［申請用CSVをダウンロード］して現在の申請内容を取得し、下の欄で読み込ませてください（マージして出力します）。
+    </div>
+    <div class="toolbar">
+      <span>セール対象: <b id="appTotal">-</b>件</span>
+      <span>／ 半額サーチ可: <b id="appHalf">-</b>件</span>
+      <span>／ 通常サーチ可: <b id="appNormal">-</b>件</span>
+      <span>／ <span style="color:#c00">条件未達: <b id="appNg">-</b>件</span></span>
+      <button class="btn ghost" id="btnAppRefresh">再計算</button>
+    </div>
+    <div class="row">
+      <div><label>CSVに含める商品</label>
+        <select id="appOnly">
+          <option value="eligible">掲載条件を満たす商品のみ（10%以上・推奨）</option>
+          <option value="half">半額サーチ対象のみ（50%以上）</option>
+          <option value="all">セール対象すべて（条件未達も含む）</option>
+        </select>
+      </div>
+      <div><label>申請済みCSV（RMSでダウンロードしたもの／任意）</label>
+        <input type="file" id="appExisting" accept=".csv">
+        <span class="muted">読み込むと既存の申請内容を残したままマージします</span>
+      </div>
+    </div>
+    <details style="margin-top:10px">
+      <summary class="muted" style="cursor:pointer">列名がRMSのテンプレートと違う場合はここで変更</summary>
+      <div class="row" style="margin-top:6px">
+        <div><label>A列</label><input type="text" id="appColA" value="申請するページの商品管理番号"></div>
+        <div><label>B列</label><input type="text" id="appColB" value="コピー元商品管理番号"></div>
+      </div>
+      <p class="muted">コピーページで申請する場合のみB列にコピー元の商品管理番号が必要です。本ツールは対応関係を持たないため空欄で出力します。</p>
+    </details>
+    <p><button class="btn" id="btnAppCsv">申請用CSVをダウンロード</button></p>
+    <div class="msg" id="appMsg"></div>
+    <div style="max-height:320px;overflow:auto">
+      <table>
+        <thead><tr><th>商品管理番号</th><th>商品名</th><th>二重価格</th><th>販売価格</th><th>割引率</th><th>判定</th></tr></thead>
+        <tbody id="appRows"></tbody>
+      </table>
+    </div>
   </div>
   <div class="card">
     <h2>変更履歴（最新2回分）</h2>
@@ -475,7 +522,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (b.dataset.tab==="apply") loadApply();
   if (b.dataset.tab==="logs") loadLogs();
   if (b.dataset.tab==="jobs") { $("jobSelCount").textContent = selected.size; loadJobs(); }
-  if (b.dataset.tab==="sale") loadSale();
+  if (b.dataset.tab==="sale") { loadSale(); loadSaleApplication(); }
 });
 
 // ---- 状態 ----
@@ -538,7 +585,12 @@ async function loadItems(){
       <td><a href="#" class="editLink" data-mn="${esc(it.manage_number)}">${esc(it.manage_number)}</a></td>
       <td>${esc(it.title)}</td>
       <td>${esc(it.tagline)}</td>
-      <td>${it.min_price==null?"":(it.min_price===it.max_price?Number(it.min_price).toLocaleString():Number(it.min_price).toLocaleString()+"〜"+Number(it.max_price).toLocaleString())}円</td>
+      <td>${it.min_price==null ? "" :
+            it.min_price===it.max_price
+              ? `<input type="number" class="listPrice" data-mn="${esc(it.manage_number)}" value="${it.min_price}"
+                   style="width:90px;padding:3px 5px" title="Enterまたはフォーカスを外すと保存されます">円`
+              : `${Number(it.min_price).toLocaleString()}〜${Number(it.max_price).toLocaleString()}円
+                 <span class="muted" title="SKUごとに価格が異なるため一覧では変更できません">(SKU別)</span>`}</td>
       <td>${it.is_new?'<span class="badge new">新規</span>':""}${it.edited&&!it.is_new?'<span class="badge edited">編集済</span>':""}${it.hide_item?'<span class="badge hidden">倉庫</span>':""}</td>
       <td class="checkcell"><input type="checkbox" class="saleCheck" value="${esc(it.manage_number)}" ${it.sale_flag?"checked":""} title="セール対象"></td>
       <td><button class="btn ghost editLink" data-mn="${esc(it.manage_number)}" style="padding:2px 10px">編集</button></td>
@@ -552,10 +604,45 @@ async function loadItems(){
   });
   document.querySelectorAll(".editLink").forEach(a => a.onclick = e => { e.preventDefault(); openEdit(a.dataset.mn); });
   document.querySelectorAll(".saleCheck").forEach(c => c.onchange = async () => {
-    try{ await api("/api/sale/flag",{method:"POST", body:{targets:[c.value], value:c.checked}}); }
+    try{ await api("/api/sale/flag",{method:"POST", body:{targets:[c.value], value:c.checked}}); syncSaleCheckAll(); }
     catch(e){ alert(e.message); c.checked = !c.checked; }
   });
+  // 販売価格のインライン編集（全SKU同額の商品のみ）
+  document.querySelectorAll(".listPrice").forEach(inp => {
+    let current = inp.value;   // 保存に成功するたび更新する（差し戻し先）
+    inp.onkeydown = e => { if (e.key === "Enter") inp.blur(); };
+    inp.onchange = async () => {
+      if (inp.value === current) return;
+      if (inp.value === "" || Number(inp.value) < 1) {
+        alert("価格は1円以上で入力してください"); inp.value = current; return;
+      }
+      inp.disabled = true;
+      try{
+        const r = await api(`/api/items/${encodeURIComponent(inp.dataset.mn)}/price`,
+                            {method:"POST", body:{price:Number(inp.value)}});
+        inp.value = r.price;     // サーバ側の丸め結果に合わせる
+        current = String(r.price);
+        inp.disabled = false;
+        inp.style.background = "#e7f7ec";
+        setTimeout(()=>{ inp.style.background=""; }, 1200);
+        loadStats();
+      }catch(e){
+        alert(e.message); inp.value = current; inp.disabled = false;
+      }
+    };
+  });
+  syncSaleCheckAll();
   loadStats();
+}
+
+// セール列のヘッダーチェックボックス（表示中の商品をまとめて切替）
+function syncSaleCheckAll(){
+  const boxes = [...document.querySelectorAll(".saleCheck")];
+  const all = $("saleCheckAll");
+  if (!all) return;
+  const on = boxes.filter(b=>b.checked).length;
+  all.checked = boxes.length>0 && on===boxes.length;
+  all.indeterminate = on>0 && on<boxes.length;
 }
 function updateSel(){
   $("selCount").textContent = selected.size;
@@ -564,6 +651,19 @@ function updateSel(){
 $("checkAll").onchange = e => {
   document.querySelectorAll(".rowCheck").forEach(c => { c.checked = e.target.checked; c.checked?selected.add(c.value):selected.delete(c.value); });
   updateSel();
+};
+$("saleCheckAll").onchange = async e => {
+  const on = e.target.checked;
+  const boxes = [...document.querySelectorAll(".saleCheck")];
+  const targets = boxes.filter(b => b.checked !== on).map(b => b.value);
+  if (!targets.length) return;
+  e.target.disabled = true;
+  try{
+    await api("/api/sale/flag", {method:"POST", body:{targets, value:on}});
+    boxes.forEach(b => b.checked = on);
+    loadStats();
+  }catch(err){ alert(err.message); e.target.checked = !on; }
+  finally{ e.target.disabled = false; syncSaleCheckAll(); }
 };
 $("btnSearch").onclick = ()=>{ page=1; loadItems(); };
 $("btnReload").onclick = ()=>{
@@ -975,6 +1075,64 @@ $("btnSaleRemove").onclick = ()=>{
   saleFlag({targets:[...selected], value:false});
 };
 $("btnSaleClear").onclick = ()=>{ if(confirm("セール対象をすべて解除しますか？")) saleFlag({clearAll:true}); };
+// ---- スーパーSALEサーチ 申請用CSV ----
+const APP_BADGE = {
+  half:   ['半額サーチ可',  '#0a7d32'],
+  normal: ['通常サーチ可',  '#e08000'],
+  ng:     ['条件未達',      '#c00'],
+  unknown:['二重価格なし',  '#888'],
+};
+async function loadSaleApplication(){
+  let d;
+  try { d = await api("/api/sale/application"); }
+  catch(e){ $("appMsg").className="msg err"; $("appMsg").textContent=e.message; return; }
+  const s = d.summary;
+  $("appTotal").textContent  = d.rows.length;
+  $("appHalf").textContent   = s.half;
+  $("appNormal").textContent = s.normal;
+  $("appNg").textContent     = s.ng + s.unknown;
+  $("appRows").innerHTML = d.rows.map(r=>{
+    const [label,color] = APP_BADGE[r.category] || APP_BADGE.unknown;
+    const yen = v => v==null ? "—" : Number(v).toLocaleString()+"円";
+    return `<tr>
+      <td>${esc(r.manageNumber)}</td>
+      <td>${esc(r.title)}${r.hidden?' <span class="badge hidden">非公開</span>':''}</td>
+      <td>${yen(r.referencePrice)}</td>
+      <td>${yen(r.price)}</td>
+      <td>${r.rate==null?"—":r.rate+"%"}</td>
+      <td style="color:${color}">${label}</td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">セール対象商品がありません。商品一覧の［🏷セール］列でチェックしてください。</td></tr>';
+}
+$("btnAppRefresh").onclick = loadSaleApplication;
+$("btnAppCsv").onclick = async ()=>{
+  const fd = new FormData();
+  fd.append("only", $("appOnly").value);
+  fd.append("colA", $("appColA").value);
+  fd.append("colB", $("appColB").value);
+  const f = $("appExisting").files[0];
+  if (f) fd.append("existing", f);
+  else if (!confirm("申請済みCSVを読み込んでいません。\n\nRMSの一括申請はアップロード内容で全件上書きされるため、\nすでに申請済みの商品がある場合は消えてしまいます。\n\nこのまま作成しますか？")) return;
+
+  $("appMsg").className="msg"; $("appMsg").textContent="作成中...";
+  try{
+    const r = await fetch("/api/sale/application-csv", {method:"POST", body:fd});
+    if(!r.ok){ const j = await r.json().catch(()=>({})); throw new Error(j.message || `HTTP ${r.status}`); }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (r.headers.get("Content-Disposition")||"").match(/filename="?([^"]+)"?/)?.[1]
+                 || "event_application.csv";
+    // Firefoxはa要素がDOMに無いとclick()が効かず、即revokeするとDLが中断される
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 5000);
+    $("appMsg").className="msg ok";
+    $("appMsg").textContent="ダウンロードしました。RMS［イベント商品申請→一括申請］でアップロードしてください。";
+  }catch(e){ $("appMsg").className="msg err"; $("appMsg").textContent=e.message; }
+};
+
 $("btnQuit").onclick = async ()=>{
   if(!confirm("ツールを終了します。よろしいですか？\n\n※編集内容は保存済みです。\n※予約された自動復元は、ツール停止中は実行されません。")) return;
   try { await fetch("/api/shutdown", {method:"POST"}); } catch(e) {}

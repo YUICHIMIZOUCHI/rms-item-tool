@@ -26,7 +26,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -707,6 +707,128 @@ def api_sale_start():
                                + (f" 自動復元予約#{job_id}（{restore_at.replace('T',' ')}）を作成済み。" if job_id else "")})
 
 
+# ---------- 楽天スーパーSALEサーチ イベント商品申請 ----------
+# 一括申請CSVの列は公式マニュアル（店舗運営Navi 000044479）記載の2列。
+#   A列: 申請するページの商品管理番号
+#   B列: コピー元商品管理番号（コピーページで申請する場合のみ入力）
+SALE_APP_COLUMNS = ["申請するページの商品管理番号", "コピー元商品管理番号"]
+
+
+def _discount_rate(item):
+    """二重価格(referencePrice)を基準にした割引率(%)を返す。判定できなければNone。
+    スーパーSALEサーチは 10%以上=通常サーチ / 50%以上=半額サーチ の掲載条件。"""
+    best = None
+    for v in (item.get("variants") or {}).values():
+        if not isinstance(v, dict):
+            continue
+        sp = v.get("standardPrice")
+        ref = (v.get("referencePrice") or {}).get("value")
+        if not isinstance(sp, (int, float)) or not isinstance(ref, (int, float)) or ref <= 0:
+            continue
+        rate = (ref - sp) / ref * 100.0
+        if best is None or rate > best:
+            best = rate
+    return best
+
+
+def _sale_application_rows():
+    """セール対象フラグが立っている商品を、申請用の行として返す"""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE sale_flag=1 ORDER BY manage_number").fetchall()
+    out = []
+    for row in rows:
+        item = get_effective(row) or {}
+        rate = _discount_rate(item)
+        if rate is None:
+            category = "unknown"
+        elif rate >= 50:
+            category = "half"      # 半額サーチ
+        elif rate >= 10:
+            category = "normal"    # 通常セールサーチ
+        else:
+            category = "ng"        # 掲載条件を満たさない
+        prices = [v.get("standardPrice") for v in (item.get("variants") or {}).values()
+                  if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float))]
+        refs = [(v.get("referencePrice") or {}).get("value")
+                for v in (item.get("variants") or {}).values()
+                if isinstance(v, dict) and isinstance((v.get("referencePrice") or {}).get("value"), (int, float))]
+        out.append({
+            "manageNumber": row["manage_number"],
+            "title": item.get("title", ""),
+            "price": min(prices) if prices else None,
+            "referencePrice": max(refs) if refs else None,
+            "rate": None if rate is None else round(rate, 1),
+            "category": category,
+            "hidden": bool(item.get("hideItem")),
+        })
+    return out
+
+
+@app.route("/api/sale/application")
+def api_sale_application():
+    rows = _sale_application_rows()
+    summary = {k: sum(1 for r in rows if r["category"] == k)
+               for k in ("half", "normal", "ng", "unknown")}
+    return jsonify({"rows": rows, "summary": summary, "columns": SALE_APP_COLUMNS})
+
+
+@app.route("/api/sale/application-csv", methods=["POST"])
+def api_sale_application_csv():
+    """申請用CSVを生成。
+    RMSの一括申請は「アップロードした内容で全件上書き」される仕様のため、
+    RMSからダウンロードした申請済みCSVを渡せばマージして出力する。"""
+    only = (request.form.get("only") or "all").strip()
+    col_a = (request.form.get("colA") or SALE_APP_COLUMNS[0]).strip() or SALE_APP_COLUMNS[0]
+    col_b = (request.form.get("colB") or SALE_APP_COLUMNS[1]).strip() or SALE_APP_COLUMNS[1]
+
+    rows = _sale_application_rows()
+    if only == "eligible":
+        rows = [r for r in rows if r["category"] in ("half", "normal")]
+    elif only == "half":
+        rows = [r for r in rows if r["category"] == "half"]
+
+    # 既存の申請済みCSV（RMSでダウンロードしたもの）をマージ
+    merged, seen = [], set()
+    f = request.files.get("existing")
+    if f:
+        raw = f.read()
+        text = None
+        for enc in ("cp932", "utf-8-sig", "utf-8"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            return jsonify({"message": "既存CSVの文字コードを判定できません"}), 400
+        for i, r in enumerate(csv.reader(io.StringIO(text))):
+            if not r or not (r[0] or "").strip():
+                continue
+            a = r[0].strip()
+            if i == 0 and ("商品管理番号" in a):   # ヘッダー行は読み飛ばす
+                continue
+            if a in seen:
+                continue
+            seen.add(a)
+            merged.append([a, (r[1].strip() if len(r) > 1 else "")])
+
+    for r in rows:
+        if r["manageNumber"] in seen:
+            continue
+        seen.add(r["manageNumber"])
+        merged.append([r["manageNumber"], ""])
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow([col_a, col_b])
+    w.writerows(merged)
+    data = io.BytesIO(buf.getvalue().encode("cp932", errors="replace"))
+    add_log("", "申請用CSV作成", "ok", f"{len(merged)}件（うちセール対象{len(rows)}件）")
+    return send_file(data, mimetype="text/csv", as_attachment=True,
+                     download_name=f"event_application_{time.strftime('%Y%m%d')}.csv")
+
+
 @app.route("/api/sale/history")
 def api_sale_history():
     with db() as conn:
@@ -956,6 +1078,41 @@ def api_item(mn):
     item["manageNumber"] = mn
     save_local_edit(mn, item, is_new=(row["is_new"] if row else True) if data.get("isNew") is None else data["isNew"])
     return jsonify({"ok": True})
+
+
+@app.route("/api/items/<mn>/price", methods=["POST"])
+def api_item_price(mn):
+    """商品一覧からの販売価格インライン編集。全SKUを同じ価格にする。
+    SKUごとに価格が違う商品は誤って揃えてしまうため受け付けない。"""
+    data = request.json or {}
+    try:
+        price = int(round(float(data.get("price"))))
+    except (TypeError, ValueError):
+        return jsonify({"message": "価格が数値ではありません"}), 400
+    if price < 1:
+        return jsonify({"message": "価格は1円以上にしてください"}), 400
+
+    with db() as conn:
+        row = conn.execute("SELECT * FROM items WHERE manage_number=?", (mn,)).fetchone()
+    if not row:
+        return jsonify({"message": "商品が見つかりません"}), 404
+    item = get_effective(row)
+    if not item:
+        return jsonify({"message": "商品データがありません"}), 400
+
+    targets = [v for v in (item.get("variants") or {}).values()
+               if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float))]
+    if not targets:
+        return jsonify({"message": "価格を持つSKUがありません。［編集］画面から設定してください"}), 400
+    if len({v["standardPrice"] for v in targets}) > 1:
+        return jsonify({"message": "SKUごとに価格が異なります。［編集］画面から個別に変更してください"}), 400
+
+    before = targets[0]["standardPrice"]
+    for v in targets:
+        v["standardPrice"] = price
+    save_local_edit(mn, item, is_new=bool(row["is_new"]))
+    add_log(mn, "価格変更（一覧）", "ok", f"{before}円 → {price}円")
+    return jsonify({"ok": True, "price": price, "skuCount": len(targets)})
 
 
 def _get_by_path(obj, path):
