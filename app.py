@@ -26,7 +26,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -132,11 +132,42 @@ def add_log(manage_number, action, status, message=""):
         )
 
 
+def to_price(value):
+    """価格を数値として読み取る。
+    RMS Item API 2.0 は standardPrice / referencePrice.value を
+    文字列（例 "38500"）で返すため、数値決め打ちで判定すると全滅する。
+    読み取れない場合は None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def price_like(original, value):
+    """RMSへ送り返す価格を、元データと同じ型で作る。
+    受け取った形（文字列）と違う型で返すと弾かれる可能性があるため型を揃える。
+    元データが無い場合（CSVでの新規登録など）はAPIの返却形式に合わせて文字列。"""
+    iv = max(int(round(value)), 1)
+    return iv if isinstance(original, (int, float)) and not isinstance(original, bool) else str(iv)
+
+
+def _csv_price(value):
+    """CSVには数値として書き出す（Excelで計算できるように）。空なら空欄。"""
+    p = to_price(value)
+    return "" if p is None else int(round(p))
+
+
 def item_summary(item):
     prices = []
     for v in (item.get("variants") or {}).values():
-        if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float)):
-            prices.append(v["standardPrice"])
+        if isinstance(v, dict):
+            p = to_price(v.get("standardPrice"))
+            if p is not None:
+                prices.append(p)
     return {
         "title": item.get("title", ""),
         "tagline": item.get("tagline", ""),
@@ -357,7 +388,8 @@ def make_snapshot(targets):
         found.add(row["manage_number"])
         prices = {}
         for vid, v in (item.get("variants") or {}).items():
-            if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float)):
+            if isinstance(v, dict) and to_price(v.get("standardPrice")) is not None:
+                # 元の値をそのまま保存する（型も含めて完全に戻せるように）
                 prices[vid] = {"standardPrice": v.get("standardPrice"),
                                "referencePrice": v.get("referencePrice")}
         snapshot[row["manage_number"]] = {
@@ -655,24 +687,27 @@ def api_sale_start():
             continue
         before = json.dumps(item, ensure_ascii=False)
         for v in (item.get("variants") or {}).values():
-            if not isinstance(v, dict) or not isinstance(v.get("standardPrice"), (int, float)):
+            if not isinstance(v, dict):
                 continue
-            original = v["standardPrice"]
+            original = v.get("standardPrice")
+            base = to_price(original)
+            if base is None:
+                continue
             if price_mode:
                 value = float(price_value)
                 if price_mode == "percent":
-                    p = round(original * (1 + value / 100.0))
+                    p = round(base * (1 + value / 100.0))
                 elif price_mode == "delta":
-                    p = original + value
+                    p = base + value
                 else:
                     p = value
-                v["standardPrice"] = max(int(round(p)), 1)
+                v["standardPrice"] = price_like(original, p)
             if set_ref:
                 # 元の販売価格を二重価格（表示価格）として設定
                 rp = v.get("referencePrice") or {}
                 rp["displayType"] = rp.get("displayType") or "REFERENCE_PRICE"
                 rp["type"] = int(ref_type) if str(ref_type).lstrip("-").isdigit() else ref_type
-                rp["value"] = int(original)
+                rp["value"] = price_like(rp.get("value", original), base)
                 v["referencePrice"] = rp
         if period_start or period_end:
             period = {}
@@ -721,9 +756,9 @@ def _discount_rate(item):
     for v in (item.get("variants") or {}).values():
         if not isinstance(v, dict):
             continue
-        sp = v.get("standardPrice")
-        ref = (v.get("referencePrice") or {}).get("value")
-        if not isinstance(sp, (int, float)) or not isinstance(ref, (int, float)) or ref <= 0:
+        sp = to_price(v.get("standardPrice"))
+        ref = to_price((v.get("referencePrice") or {}).get("value"))
+        if sp is None or ref is None or ref <= 0:
             continue
         rate = (ref - sp) / ref * 100.0
         if best is None or rate > best:
@@ -748,11 +783,10 @@ def _sale_application_rows():
             category = "normal"    # 通常セールサーチ
         else:
             category = "ng"        # 掲載条件を満たさない
-        prices = [v.get("standardPrice") for v in (item.get("variants") or {}).values()
-                  if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float))]
-        refs = [(v.get("referencePrice") or {}).get("value")
-                for v in (item.get("variants") or {}).values()
-                if isinstance(v, dict) and isinstance((v.get("referencePrice") or {}).get("value"), (int, float))]
+        variants = [v for v in (item.get("variants") or {}).values() if isinstance(v, dict)]
+        prices = [p for p in (to_price(v.get("standardPrice")) for v in variants) if p is not None]
+        refs = [p for p in (to_price((v.get("referencePrice") or {}).get("value")) for v in variants)
+                if p is not None]
         out.append({
             "manageNumber": row["manage_number"],
             "title": item.get("title", ""),
@@ -818,6 +852,18 @@ def api_sale_application_csv():
             continue
         seen.add(r["manageNumber"])
         merged.append([r["manageNumber"], ""])
+
+    if not merged:
+        # 中身が0件のCSVを黙って落とすと「何も入っていない」と混乱するため止める
+        total_flagged = len(_sale_application_rows())
+        if total_flagged == 0:
+            msg = ("セール対象の商品が1件もありません。"
+                   "［商品一覧］でセール列にチェックを入れてから実行してください。")
+        else:
+            msg = (f"条件に合う商品がありません（セール対象{total_flagged}件はすべて掲載条件未達）。"
+                   "二重価格に対して10%以上の値引きが必要です。"
+                   "「出力対象」を『すべて』にすると全件出力できます。")
+        return jsonify({"message": msg}), 400
 
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
@@ -1101,15 +1147,15 @@ def api_item_price(mn):
         return jsonify({"message": "商品データがありません"}), 400
 
     targets = [v for v in (item.get("variants") or {}).values()
-               if isinstance(v, dict) and isinstance(v.get("standardPrice"), (int, float))]
+               if isinstance(v, dict) and to_price(v.get("standardPrice")) is not None]
     if not targets:
         return jsonify({"message": "価格を持つSKUがありません。［編集］画面から設定してください"}), 400
-    if len({v["standardPrice"] for v in targets}) > 1:
+    if len({to_price(v["standardPrice"]) for v in targets}) > 1:
         return jsonify({"message": "SKUごとに価格が異なります。［編集］画面から個別に変更してください"}), 400
 
-    before = targets[0]["standardPrice"]
+    before = to_price(targets[0]["standardPrice"])
     for v in targets:
-        v["standardPrice"] = price
+        v["standardPrice"] = price_like(v.get("standardPrice"), price)
     save_local_edit(mn, item, is_new=bool(row["is_new"]))
     add_log(mn, "価格変更（一覧）", "ok", f"{before}円 → {price}円")
     return jsonify({"ok": True, "price": price, "skuCount": len(targets)})
@@ -1163,16 +1209,19 @@ def api_bulk_edit():
             mode = op.get("mode")
             value = float(op.get("value", 0))
             for v in (item.get("variants") or {}).values():
-                if not isinstance(v, dict) or not isinstance(v.get("standardPrice"), (int, float)):
+                if not isinstance(v, dict):
                     continue
-                p = v["standardPrice"]
+                original = v.get("standardPrice")
+                p = to_price(original)
+                if p is None:
+                    continue
                 if mode == "percent":
                     p = round(p * (1 + value / 100.0))
                 elif mode == "delta":
                     p = p + value
                 elif mode == "fixed":
                     p = value
-                v["standardPrice"] = max(int(round(p)), 1)
+                v["standardPrice"] = price_like(original, p)
         elif kind == "refprice":
             # 二重価格（表示価格）の一括設定/解除
             for v in (item.get("variants") or {}).values():
@@ -1184,8 +1233,8 @@ def api_bulk_edit():
                 mode = op.get("mode", "fixed")
                 value = float(op.get("value", 0))
                 if mode == "percent":
-                    base = v.get("standardPrice")
-                    if not isinstance(base, (int, float)):
+                    base = to_price(v.get("standardPrice"))
+                    if base is None:
                         continue
                     val = base * (1 + value / 100.0)
                 else:
@@ -1194,7 +1243,7 @@ def api_bulk_edit():
                 rp = v.get("referencePrice") or {}
                 rp["displayType"] = rp.get("displayType") or "REFERENCE_PRICE"
                 rp["type"] = int(t) if str(t).lstrip("-").isdigit() else t
-                rp["value"] = max(int(round(val)), 1)
+                rp["value"] = price_like(rp.get("value", v.get("standardPrice")), val)
                 v["referencePrice"] = rp
         elif kind == "hide":
             item["hideItem"] = bool(op.get("value"))
@@ -1316,11 +1365,13 @@ def api_csv_import():
                 item["images"] = images
             vid = (r.get("variantId") or "sku-1").strip()
             variant = {}
-            if (r.get("standardPrice") or "").strip():
-                variant["standardPrice"] = int(float(r["standardPrice"]))
-            if (r.get("referencePrice") or "").strip():
+            sp = to_price(r.get("standardPrice"))
+            if sp is not None:
+                variant["standardPrice"] = price_like(None, sp)
+            rv = to_price(r.get("referencePrice"))
+            if rv is not None:
                 variant["referencePrice"] = {"displayType": "REFERENCE_PRICE",
-                                             "value": int(float(r["referencePrice"]))}
+                                             "value": price_like(None, rv)}
             item["variants"] = {vid: variant}
             if (r.get("quantity") or "").strip():
                 item["_initialQuantity"] = int(float(r["quantity"]))
@@ -1358,7 +1409,7 @@ def api_csv_export():
             1 if (item.get("payment") or {}).get("taxIncluded") else 0,
             1 if item.get("hideItem") else 0,
             locs[0], locs[1], locs[2],
-            vid, v.get("standardPrice", ""), ref.get("value", ""), "",
+            vid, _csv_price(v.get("standardPrice")), _csv_price(ref.get("value")), "",
         ])
     data = io.BytesIO(buf.getvalue().encode("cp932", errors="replace"))
     return send_file(data, mimetype="text/csv", as_attachment=True,
