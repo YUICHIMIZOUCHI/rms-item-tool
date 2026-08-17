@@ -362,6 +362,20 @@
     <input type="file" id="csvFile" accept=".csv">
     <p><button class="btn" id="btnCsvImport">取り込む</button></p>
     <div class="msg" id="csvMsg"></div>
+    <p class="muted">※すでにダウンロード済みの商品はスキップされます。既存商品の変更は下の［CSVで既存商品を更新］をお使いください。</p>
+  </div>
+
+  <div class="card">
+    <h2>CSVで既存商品を更新</h2>
+    <p class="muted">［現在の商品一覧をCSVエクスポート］→ Excelで編集 → ここで取り込み、の流れで既存商品をまとめて書き換えます。<br>
+    <b>空欄の列は変更しません。</b>列ごと削除しても構いません（manageNumber と title だけの2列CSVでも動きます）。<br>
+    更新できる項目：商品名／キャッチコピー／商品番号／ジャンルID／説明文3種／倉庫指定／税込区分／販売価格／二重価格<br>
+    <b>画像と在庫数は更新できません</b>（CSVには画像が3枚しか入らないため、4枚目以降を消してしまう事故を防いでいます）。</p>
+    <label>CSVファイルを選択</label>
+    <input type="file" id="csvUpdFile" accept=".csv">
+    <p><button class="btn" id="btnCsvUpdate">既存商品を更新する</button></p>
+    <div class="msg" id="csvUpdMsg"></div>
+    <p class="muted">取り込み後は「編集済」になるだけで、楽天にはまだ送信されません。［RMSに反映］で送信します。</p>
   </div>
 </section>
 
@@ -964,6 +978,20 @@ $("btnCsvImport").onclick = async ()=>{
     $("csvMsg").textContent = r.message + (r.errors.length? "\n"+r.errors.join(" / "):"");
     loadItems();
   }catch(e){ $("csvMsg").className="msg err"; $("csvMsg").textContent=e.message; }
+};
+
+$("btnCsvUpdate").onclick = async ()=>{
+  const f = $("csvUpdFile").files[0];
+  if(!f){ $("csvUpdMsg").className="msg err"; $("csvUpdMsg").textContent="ファイルを選択してください"; return; }
+  if(!confirm("CSVの内容で既存商品を上書きします。\n\n・空欄の列は変更しません\n・画像と在庫数は変更しません\n\n取り込み後は［RMSに反映］を実行するまで楽天側は変わりません。\nこのまま取り込みますか？")) return;
+  const fd = new FormData(); fd.append("file", f);
+  $("csvUpdMsg").className="msg"; $("csvUpdMsg").textContent="取り込み中...";
+  try{
+    const r = await api("/api/csv-update",{method:"POST", body:fd});
+    $("csvUpdMsg").className = "msg " + (r.errors.length?"err":"ok");
+    $("csvUpdMsg").textContent = r.message + (r.errors.length? "\n"+r.errors.join(" / "):"");
+    loadItems();
+  }catch(e){ $("csvUpdMsg").className="msg err"; $("csvUpdMsg").textContent=e.message; }
 };
 
 // ---- 反映 ----

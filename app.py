@@ -26,7 +26,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -534,14 +534,12 @@ def scheduler_loop():
                 except ValueError:
                     overdue_min = 0
                 if overdue_min > OVERDUE_GRACE_MIN:
-                    # 停止中に時刻を過ぎた予約は勝手に実行しない（要確認）
-                    with db() as conn:
-                        conn.execute(
-                            "UPDATE jobs SET status='needs_confirm' WHERE id=? AND status='pending'",
-                            (r["id"],))
+                    # 時刻を過ぎていても実行する。復元は「セール前の状態に戻す」方向の
+                    # 操作なので遅れても安全な一方、保留のままだと販売期間が過ぎた商品が
+                    # 買えない状態で放置されてしまうため。
                     add_log("", "予約復元", "WARN",
-                            f"予約#{r['id']} は実行時刻を過ぎていたため保留にしました。[予約]タブから実行してください。")
-                    continue
+                            f"予約#{r['id']} は実行時刻を{int(overdue_min)}分過ぎていたため"
+                            "今から自動実行します。")
                 _try_start_scheduled(r["id"])
         except Exception:
             pass
@@ -1322,7 +1320,7 @@ def api_csv_template():
                 "<p>PC用商品説明文</p>", "スマホ用商品説明文", "<p>PC用販売説明文</p>",
                 "100000", "1", "0", "/folder/image1.jpg", "", "",
                 "sku-001", "1980", "2980", "10"])
-    data = io.BytesIO(buf.getvalue().encode("cp932", errors="replace"))
+    data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
     return send_file(data, mimetype="text/csv", as_attachment=True,
                      download_name="item_template.csv")
 
@@ -1343,11 +1341,23 @@ def api_csv_import():
     if text is None:
         return jsonify({"message": "文字コードを判定できません（UTF-8またはShift_JISで保存してください）"}), 400
     reader = csv.DictReader(io.StringIO(text))
-    created, errors = 0, []
+    created, errors, skipped = 0, [], 0
     for i, r in enumerate(reader, 2):
         try:
             mn = (r.get("manageNumber") or "").strip()
             if not mn:
+                continue
+            # 既存商品をここで取り込むと、CSVの17列しか持たない「骨組み商品」で
+            # 上書き登録され、反映時のupsertで本物の商品ページを破壊してしまう。
+            # 既存商品の一括更新は［CSVで既存商品を更新］を使う。
+            with db() as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM items WHERE manage_number=? AND is_new=0", (mn,)).fetchone()
+            if exists:
+                skipped += 1
+                if len(errors) < 50:
+                    errors.append(f"{i}行目: {mn} は既存商品のためスキップしました"
+                                  "（更新したい場合は［CSVで既存商品を更新］をお使いください）")
                 continue
             item = {
                 "manageNumber": mn,
@@ -1388,9 +1398,136 @@ def api_csv_import():
             created += 1
         except Exception as e:
             errors.append(f"{i}行目: {e}")
-    return jsonify({"ok": True, "created": created, "errors": errors,
-                    "message": f"{created}件を取り込みました（新規・未反映）"
-                               + (f" / エラー{len(errors)}件" if errors else "")})
+    msg = f"{created}件を取り込みました（新規・未反映）"
+    if skipped:
+        msg += f" / 既存商品のためスキップ{skipped}件"
+    if len(errors) > skipped:
+        msg += f" / エラー{len(errors) - skipped}件"
+    return jsonify({"ok": True, "created": created, "skipped": skipped,
+                    "errors": errors, "message": msg})
+
+
+@app.route("/api/csv-update", methods=["POST"])
+def api_csv_update():
+    """CSVで既存商品を一括更新する。
+    ［エクスポート → Excelで編集 → 取り込み → RMSに反映］の運用向け。
+
+    ・manageNumber でDBの既存商品にマッチする。無い番号は作らずスキップして報告
+    ・空欄の列は「変更しない」。列そのものが無くても同じ（商品名だけの2列CSVでも動く）
+    ・画像とquantityは扱わない。3列しかない画像列で全画像を置き換える事故を防ぐため
+    """
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"message": "ファイルがありません"}), 400
+    raw = f.read()
+    text = None
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return jsonify({"message": "文字コードを判定できません（UTF-8またはShift_JISで保存してください）"}), 400
+
+    def cell(row, key):
+        """空欄・列なしは None（＝変更しない）。値があれば文字列を返す"""
+        if key not in row:
+            return None
+        v = row.get(key)
+        if v is None:
+            return None
+        v = v.strip()
+        return v if v != "" else None
+
+    reader = csv.DictReader(io.StringIO(text))
+    updated, unchanged, missing, errors = 0, 0, [], []
+    for i, r in enumerate(reader, 2):
+        try:
+            mn = (r.get("manageNumber") or "").strip()
+            if not mn:
+                continue
+            with db() as conn:
+                row = conn.execute("SELECT * FROM items WHERE manage_number=?", (mn,)).fetchone()
+            if not row:
+                missing.append(mn)
+                if len(errors) < 50:
+                    errors.append(f"{i}行目: {mn} は未ダウンロードのためスキップしました")
+                continue
+
+            item = get_effective(row)
+            if not item:
+                errors.append(f"{i}行目: {mn} の商品データがありません")
+                continue
+            before = json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+            for key, path in (("title", "title"), ("tagline", "tagline"),
+                              ("itemNumber", "itemNumber"), ("genreId", "genreId"),
+                              ("salesDescription", "salesDescription")):
+                val = cell(r, key)
+                if val is not None:
+                    item[path] = val
+            for key, sub in (("productDescriptionPc", "pc"), ("productDescriptionSp", "sp")):
+                val = cell(r, key)
+                if val is not None:
+                    pd = item.get("productDescription")
+                    if not isinstance(pd, dict):
+                        pd = {}
+                    pd[sub] = val
+                    item["productDescription"] = pd
+            val = cell(r, "hideItem")
+            if val is not None:
+                item["hideItem"] = val in ("1", "true", "TRUE")
+            val = cell(r, "taxIncluded")
+            if val is not None:
+                pay = item.get("payment")
+                if not isinstance(pay, dict):
+                    pay = {}
+                pay["taxIncluded"] = val in ("1", "true", "TRUE")
+                item["payment"] = pay
+
+            # 価格。variantId列でSKUを指定、空欄なら先頭SKU
+            variants = item.get("variants") or {}
+            vid = cell(r, "variantId")
+            if vid is None:
+                vid = next(iter(variants), None)
+            if vid is not None and vid in variants and isinstance(variants[vid], dict):
+                v = variants[vid]
+                sp = to_price(cell(r, "standardPrice"))
+                if sp is not None:
+                    v["standardPrice"] = price_like(v.get("standardPrice"), sp)
+                rv = to_price(cell(r, "referencePrice"))
+                if rv is not None:
+                    cur = to_price((v.get("referencePrice") or {}).get("value"))
+                    # 値が変わるときだけ触る。同値で書き換えると displayType が
+                    # SHOP_SETTING から REFERENCE_PRICE に変わってしまう
+                    if cur is None or abs(cur - rv) >= 0.5:
+                        rp = v.get("referencePrice") or {}
+                        rp["displayType"] = "REFERENCE_PRICE"
+                        rp.setdefault("type", 2)
+                        rp["value"] = price_like(rp.get("value", v.get("standardPrice")), rv)
+                        v["referencePrice"] = rp
+            elif vid is not None and variants:
+                errors.append(f"{i}行目: {mn} にSKU '{vid}' がありません（価格は変更していません）")
+
+            if json.dumps(item, ensure_ascii=False, sort_keys=True) == before:
+                unchanged += 1
+                continue
+            save_local_edit(mn, item, is_new=bool(row["is_new"]))
+            updated += 1
+        except Exception as e:
+            errors.append(f"{i}行目: {e}")
+
+    add_log("", "CSVで既存商品を更新", "ok",
+            f"更新{updated}件 / 変更なし{unchanged}件 / 対象外{len(missing)}件")
+    msg = f"{updated}件を更新しました（ローカル保存・未反映）"
+    if unchanged:
+        msg += f" / 変更なし{unchanged}件"
+    if missing:
+        msg += f" / 未ダウンロードのためスキップ{len(missing)}件"
+    msg += "。内容を確認してから［RMSに反映］を実行してください。"
+    return jsonify({"ok": True, "updated": updated, "unchanged": unchanged,
+                    "missing": len(missing), "errors": errors, "message": msg})
 
 
 @app.route("/api/csv-export")
@@ -1419,7 +1556,10 @@ def api_csv_export():
             locs[0], locs[1], locs[2],
             vid, _csv_price(v.get("standardPrice")), _csv_price(ref.get("value")), "",
         ])
-    data = io.BytesIO(buf.getvalue().encode("cp932", errors="replace"))
+    # BOM付きUTF-8。cp932だと「♥」が「?」に、「〜」(U+301C)が「～」(U+FF5E)に化け、
+    # 編集していない説明文まで「変更あり」になって反映時に本当に壊れる。
+    # ExcelはBOMがあればUTF-8として正しく開く。
+    data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
     return send_file(data, mimetype="text/csv", as_attachment=True,
                      download_name="items_export.csv")
 
