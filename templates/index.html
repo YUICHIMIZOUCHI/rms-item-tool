@@ -106,7 +106,7 @@
         <option value="tagline">キャッチコピー</option>
         <option value="description">説明文（本文検索）</option>
       </select>
-      <input type="text" id="searchBox" placeholder="検索キーワード">
+      <input type="text" id="searchBox" placeholder="検索キーワード" autocomplete="off">
       <select id="filterOnly">
         <option value="">すべて</option>
         <option value="edited">未反映（編集済/新規）のみ</option>
@@ -114,7 +114,8 @@
         <option value="hidden">倉庫指定のみ</option>
         <option value="sale">セール対象のみ</option>
       </select>
-      <input type="text" id="fGenre" placeholder="ジャンルID（完全一致）" style="width:150px">
+      <input type="text" id="fGenre" placeholder="ジャンルID（完全一致）" style="width:150px"
+             inputmode="numeric" autocomplete="off">
       <button class="btn" id="btnSearch">絞り込む</button>
       <button class="btn ghost" id="btnReload">全解除</button>
       <span class="muted" id="listInfo"></span>
@@ -555,7 +556,8 @@ function filterQuery(){
   const p = new URLSearchParams({
     q: $("searchBox").value, qfield: $("qField").value,
     only: colFilters.status.only ?? $("filterOnly").value,
-    genre: $("fGenre").value.trim(),
+    // ブラウザのオートフィルが数字以外を入れると完全一致で全件0件になるため無視する
+    genre: /^\d+$/.test($("fGenre").value.trim()) ? $("fGenre").value.trim() : "",
   });
   if (colFilters.price.min) p.set("price_min", colFilters.price.min);
   if (colFilters.price.max) p.set("price_max", colFilters.price.max);
@@ -784,7 +786,9 @@ $("btnDownload").onclick = async () => {
   if(!confirm("RMSから商品一覧をダウンロードします。ローカルの未反映編集は上書きされます。よろしいですか？")) return;
   try{
     await api("/api/download",{method:"POST"});
-    watchJob(()=>{ loadItems(); });
+    // ページを戻さないと、2ページ目以降を開いた状態では現在ページ＞総ページ数となり
+    // ダウンロード成功なのに「該当0件」に見えてしまう
+    watchJob(()=>{ page=1; loadItems(); });
   }catch(e){ alert(e.message); }
 };
 function watchJob(onDone){
@@ -1141,6 +1145,10 @@ $("btnQuit").onclick = async ()=>{
     '<h2 style="color:#bf0000">ツールを終了しました</h2>' +
     '<p class="muted">このタブは閉じて構いません。<br>' +
     '再開するには rms-item-tool.exe をもう一度ダブルクリックしてください。</p></div>';
+};
+// 値だけ入れて［値引き方法］が未選択のまま実行され、価格変更が黙ってスキップされるのを防ぐ
+$("salePriceValue").oninput = ()=>{
+  if($("salePriceValue").value !== "" && !$("salePriceMode").value) $("salePriceMode").value = "percent";
 };
 $("btnSaleShow").onclick = ()=>{
   $("filterOnly").value="sale"; page=1;

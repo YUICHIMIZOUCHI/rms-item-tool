@@ -26,7 +26,7 @@ else:
 DB_PATH = os.path.join(BASE_DIR, "items.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"))
 app.config["JSON_AS_ASCII"] = False
@@ -664,6 +664,11 @@ def api_sale_start():
         return jsonify({"message": "セール内容（価格・期間・二重価格のいずれか）を設定してください"}), 400
     if price_mode and price_value == "":
         return jsonify({"message": "価格の値を入力してください"}), 400
+    if not price_mode and str(price_value).strip() != "":
+        # 値だけ入れて［値引き方法］が未選択だと、黙って価格変更がスキップされ
+        # 「割引が効かない」ように見えるため、ここで止める
+        return jsonify({"message": "［値引き方法］が選択されていません。"
+                                   "値を入力した場合は「率で値引き（%）」などを選んでください"}), 400
     if auto_restore:
         if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$", restore_at):
             return jsonify({"message": "自動復元の日時を指定してください"}), 400
@@ -704,8 +709,10 @@ def api_sale_start():
                 v["standardPrice"] = price_like(original, p)
             if set_ref:
                 # 元の販売価格を二重価格（表示価格）として設定
+                # displayTypeは必ず上書きする。元がSHOP_SETTING（店舗設定に従う）のまま
+                # typeを併送するとRMSに IE0151 で商品ごと拒否され、価格も期間も反映されない。
                 rp = v.get("referencePrice") or {}
-                rp["displayType"] = rp.get("displayType") or "REFERENCE_PRICE"
+                rp["displayType"] = "REFERENCE_PRICE"
                 rp["type"] = int(ref_type) if str(ref_type).lstrip("-").isdigit() else ref_type
                 rp["value"] = price_like(rp.get("value", original), base)
                 v["referencePrice"] = rp
@@ -1240,8 +1247,9 @@ def api_bulk_edit():
                 else:
                     val = value
                 t = op.get("type", 1)
+                # displayTypeは必ず上書きする（SHOP_SETTINGのまま type を送ると IE0151）
                 rp = v.get("referencePrice") or {}
-                rp["displayType"] = rp.get("displayType") or "REFERENCE_PRICE"
+                rp["displayType"] = "REFERENCE_PRICE"
                 rp["type"] = int(t) if str(t).lstrip("-").isdigit() else t
                 rp["value"] = price_like(rp.get("value", v.get("standardPrice")), val)
                 v["referencePrice"] = rp
